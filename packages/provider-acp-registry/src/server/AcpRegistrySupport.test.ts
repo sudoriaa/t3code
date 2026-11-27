@@ -24,6 +24,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as AcpRegistrySupport from "./AcpRegistrySupport.ts";
+import { mergeBuiltInAcpRegistryAgents } from "./builtinAcpAgents.ts";
 import { prefersHttpMcpTransport } from "./mcpTransport.ts";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 
@@ -2393,20 +2394,7 @@ describe("AcpRegistrySupport", () => {
         cacheDir,
         toolsDir: `${cacheDir}/tools`,
         registryUrl,
-      }).pipe(
-        Effect.provide(
-          layerResolver(
-            (request) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(
-                  request,
-                  new Response(makeRegistry(makeAgent({ npx: { package: "@example/acp@1.2.3" } }))),
-                ),
-              ),
-            { PATH: npmBin },
-          ),
-        ),
-      );
+      }).pipe(Effect.provideService(HostProcess.Environment, { PATH: npmBin }));
 
       const result = yield* resolver.search({ query: "deepseek" });
 
@@ -2418,7 +2406,21 @@ describe("AcpRegistrySupport", () => {
           distribution: "npx",
         },
       ]);
-    }).pipe(Effect.scoped);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerResolver(
+          (request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(makeRegistry(makeAgent({ npx: { package: "@example/acp@1.2.3" } }))),
+              ),
+            ),
+          { PATH: "" },
+        ),
+      ),
+    );
   });
 
   it.effect("keeps a listed registry entry over the bundled copy of it", () => {
@@ -2441,22 +2443,23 @@ describe("AcpRegistrySupport", () => {
         cacheDir,
         toolsDir: `${cacheDir}/tools`,
         registryUrl,
-      }).pipe(
-        Effect.provide(
-          layerResolver(
-            (request) =>
-              Effect.succeed(
-                HttpClientResponse.fromWeb(request, new Response(makeRegistry(listed))),
-              ),
-            { PATH: npmBin },
-          ),
-        ),
-      );
+      }).pipe(Effect.provideService(HostProcess.Environment, { PATH: npmBin }));
 
       const result = yield* resolver.search({ query: "" });
 
       expect(result.agents.map((agent) => `${agent.id}@${agent.version}`)).toEqual(["dsh@9.9.9"]);
-    }).pipe(Effect.scoped);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerResolver(
+          (request) =>
+            Effect.succeed(
+              HttpClientResponse.fromWeb(request, new Response(makeRegistry(listed))),
+            ),
+          { PATH: "" },
+        ),
+      ),
+    );
   });
 
   it("merges bundled agents without reordering or duplicating the listed ones", () => {
