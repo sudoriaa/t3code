@@ -82,19 +82,31 @@ jobs:
           $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$install) { throw 'vswhere 找不到带 VC++ 工具集的 VS 安装' }
 
-          $component = '${{ inputs.arch == 'arm64' && 'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre' || 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre' }}'
-          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
-          $p = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
-            'modify', '--installPath', "`"$install`"", '--add', $component,
-            '--quiet', '--norestart', '--wait'
-          )
-          if ($p.ExitCode -notin @(0, 3010)) { throw "vs_installer 退出码 $($p.ExitCode)" }
-
           $spectreArch = if ('${{ inputs.arch }}' -eq 'arm64') { 'arm64' } else { 'x64' }
-          $toolset = Get-ChildItem (Join-Path $install 'VC\Tools\MSVC') -Directory |
-            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
-          $spectre = Join-Path $toolset.FullName "lib\spectre\$spectreArch"
-          if (!(Test-Path $spectre)) { throw "Spectre 库仍缺失: $spectre" }
+          $component = if ($spectreArch -eq 'arm64') {
+            'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
+          } else {
+            'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
+          }
+
+          # vs_installer 不接受 --wait（会以 87 / ERROR_INVALID_PARAMETER 退出），
+          # 它也可能把真正的安装转交给子进程，所以判据是 spectre 目录出现，而不是退出码。
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+          $p = Start-Process -FilePath $installer -PassThru -NoNewWindow -Wait -ArgumentList @(
+            'modify', "--installPath `"$install`"", '--add', $component, '--quiet', '--norestart'
+          )
+          Write-Output "vs_installer exit=$($p.ExitCode)"
+
+          $spectre = $null
+          $deadline = (Get-Date).AddMinutes(15)
+          do {
+            Start-Sleep -Seconds 15
+            $toolset = Get-ChildItem (Join-Path $install 'VC\Tools\MSVC') -Directory |
+              Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+            $spectre = Join-Path $toolset.FullName "lib\spectre\$spectreArch"
+          } while (!(Test-Path $spectre) -and (Get-Date) -lt $deadline)
+          if (!(Test-Path $spectre)) { throw "Spectre 库仍缺失: $spectre (vs_installer exit=$($p.ExitCode))" }
+          Write-Output "Spectre libs present: $spectre"
 
       # .env.example 里是官方发布同样烧进产品的公开标识，不是密钥。
       - name: Write build config
