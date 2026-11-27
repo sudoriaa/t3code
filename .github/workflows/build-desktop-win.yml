@@ -1,38 +1,28 @@
-name: Build Windows desktop
+name: Build Windows desktop x64
 
-# Fork 专用。上游 release-desktop.yml 是 release.yml 的 workflow_call 子流程：它要读
-# 同一次 run 里 build_bundle 产出的 js-bundle，Windows job 还要等 Linux CLI archive
-# 产物，单独触发会在 "Wait for Linux CLI archive" 卡住。上游 release.yml 在 fork 上
-# 被 GitHub 标成 disabled_fork，且全部 job 跑 blacksmith-* 自托管标签——fork 没有
-# 这些 runner，会永久排队。
+# Fork 专用，只产 x64 NSIS 安装包。上游 release-desktop.yml 是 release.yml 的
+# workflow_call 子流程：它要读同一次 run 里 build_bundle 产出的 js-bundle，Windows
+# job 还要等 Linux CLI archive 产物，单独触发会卡在 "Wait for Linux CLI archive"。
+# 上游 release.yml 在 fork 上被标为 disabled_fork，且所有桌面 job 都跑 blacksmith-*
+# 自托管标签——fork 没有这些 runner，队列永不动。
 #
-# 这里用 GitHub 托管的 windows-latest 跑 build-desktop-artifact.ts 的单机完整路径：
-# 自己构建 JS bundle（内部 vp run build:desktop）、cargo 编 native/resource-monitor、
-# 阶段化 pnpm install --prod、最后 electron-builder 出 NSIS。
+# 这里在 GitHub 托管的 windows-latest 上跑 build-desktop-artifact.ts 的单机完整路径：
+# 自建 JS bundle（内部 vp run build:desktop）、cargo 编 native/resource-monitor、
+# 阶段化 pnpm install --prod，最后 electron-builder 出 NSIS。
 
 on:
   workflow_dispatch:
-    inputs:
-      arch:
-        description: "目标架构"
-        type: choice
-        options: [x64, arm64]
-        default: x64
-      signed:
-        description: "签名安装包（需先在仓库配置签名 secrets，默认关闭）"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-desktop-win-${{ inputs.arch }}
+  group: build-desktop-win-x64
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Windows ${{ inputs.arch }} NSIS
+    name: Windows x64 NSIS
     runs-on: windows-latest
     timeout-minutes: 150
     steps:
@@ -41,7 +31,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # setup-vp 自带 package.json engines 里钉死的 Node（26.13.1），并暴露 vp。
+      # setup-vp 自带 package.json engines 钉死的 Node（26.13.1），并暴露 vp。
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
         with:
@@ -70,11 +60,11 @@ jobs:
       - name: Install Rust target
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ inputs.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+          targets: x86_64-pc-windows-msvc
 
-      # preflightWindowsDesktopBuild 会校验 VC\Tools\MSVC\<ver>\lib\spectre\<arch>，
+      # preflightWindowsDesktopBuild 会校验 VC\Tools\MSVC\<ver>\lib\spectre\x64，
       # 缺了直接 WindowsDesktopBuildPrerequisitesMissingError。GitHub 托管镜像默认
-      # 不带 Spectre 缓解库，必须补装该 VS 组件（托管 runner 本身有管理员权限）。
+      # 不带 Spectre 缓解库，必须补装该 VS 组件（托管 runner 有管理员权限）。
       - name: Add Spectre-mitigated MSVC libraries
         shell: pwsh
         run: |
@@ -82,18 +72,13 @@ jobs:
           $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$install) { throw 'vswhere 找不到带 VC++ 工具集的 VS 安装' }
 
-          $spectreArch = if ('${{ inputs.arch }}' -eq 'arm64') { 'arm64' } else { 'x64' }
-          $component = if ($spectreArch -eq 'arm64') {
-            'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre'
-          } else {
-            'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre'
-          }
-
           # vs_installer 不接受 --wait（会以 87 / ERROR_INVALID_PARAMETER 退出），
-          # 它也可能把真正的安装转交给子进程，所以判据是 spectre 目录出现，而不是退出码。
+          # 也可能把真正的安装转交给子进程，所以判据是 spectre 目录出现，不是退出码。
           $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
           $p = Start-Process -FilePath $installer -PassThru -NoNewWindow -Wait -ArgumentList @(
-            'modify', "--installPath `"$install`"", '--add', $component, '--quiet', '--norestart'
+            'modify', "--installPath `"$install`"",
+            '--add', 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre',
+            '--quiet', '--norestart'
           )
           Write-Output "vs_installer exit=$($p.ExitCode)"
 
@@ -103,7 +88,7 @@ jobs:
             Start-Sleep -Seconds 15
             $toolset = Get-ChildItem (Join-Path $install 'VC\Tools\MSVC') -Directory |
               Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
-            $spectre = Join-Path $toolset.FullName "lib\spectre\$spectreArch"
+            $spectre = Join-Path $toolset.FullName 'lib\spectre\x64'
           } while (!(Test-Path $spectre) -and (Get-Date) -lt $deadline)
           if (!(Test-Path $spectre)) { throw "Spectre 库仍缺失: $spectre (vs_installer exit=$($p.ExitCode))" }
           Write-Output "Spectre libs present: $spectre"
@@ -115,26 +100,52 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: |
-          $args = @('scripts/build-desktop-artifact.ts', '--platform', 'win', '--target', 'nsis', '--arch', '${{ inputs.arch }}')
-          if ('${{ inputs.signed }}' -eq 'true') { $args += '--signed' }
-          node @args
+        run: node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64
 
-      - name: Checksums
+      # 即使 payload 校验失败，也要拿到 electron-builder 已经产出的安装包和文件清单。
+      - name: Inspect payload
+        if: always()
         shell: pwsh
         run: |
-          Get-ChildItem release -File |
+          if (!(Test-Path release)) { Write-Output 'release/ 不存在'; exit 0 }
+          $root = (Resolve-Path release).Path
+          $files = Get-ChildItem release -Recurse -File
+          Write-Output "release/ 文件总数: $($files.Count)"
+          $unpackedRoot = Join-Path $root 'win-unpacked'
+          $unpacked = $files | Where-Object { $_.FullName.StartsWith($unpackedRoot) }
+          Write-Output "win-unpacked 文件数: $($unpacked.Count)  (脚本上限 80)"
+          if ($unpacked) {
+            $unpacked | ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
+              Sort-Object | Set-Content (Join-Path $root 'win-unpacked-files.txt')
+            Write-Output '--- win-unpacked 第一层分组 ---'
+            $unpacked |
+              ForEach-Object { $_.FullName.Substring($unpackedRoot.Length + 1).Split('\')[0] } |
+              Group-Object | Sort-Object Count -Descending |
+              ForEach-Object { '{0,4}  {1}' -f $_.Count, $_.Name }
+          }
+          Write-Output '--- release/ 顶层 ---'
+          Get-ChildItem release | Select-Object Mode, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}, Name |
+            Format-Table -AutoSize | Out-String | Write-Output
+
+      - name: Checksums
+        if: always()
+        shell: pwsh
+        run: |
+          if (!(Test-Path release)) { exit 0 }
+          Get-ChildItem release -File -Filter *.exe |
             ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
             Tee-Object -FilePath release/SHA256SUMS.txt | Out-Host
 
       - name: Upload installer
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: t3code-desktop-win-${{ inputs.arch }}
+          name: t3code-desktop-win-x64
           path: |
             release/*.exe
             release/*.exe.blockmap
             release/*.yml
             release/SHA256SUMS.txt
-          if-no-files-found: error
+            release/win-unpacked-files.txt
+          if-no-files-found: warn
           retention-days: 14
