@@ -1,0 +1,128 @@
+name: Build Windows desktop
+
+# Fork 专用。上游 release-desktop.yml 是 release.yml 的 workflow_call 子流程：它要读
+# 同一次 run 里 build_bundle 产出的 js-bundle，Windows job 还要等 Linux CLI archive
+# 产物，单独触发会在 "Wait for Linux CLI archive" 卡住。上游 release.yml 在 fork 上
+# 被 GitHub 标成 disabled_fork，且全部 job 跑 blacksmith-* 自托管标签——fork 没有
+# 这些 runner，会永久排队。
+#
+# 这里用 GitHub 托管的 windows-latest 跑 build-desktop-artifact.ts 的单机完整路径：
+# 自己构建 JS bundle（内部 vp run build:desktop）、cargo 编 native/resource-monitor、
+# 阶段化 pnpm install --prod、最后 electron-builder 出 NSIS。
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "目标架构"
+        type: choice
+        options: [x64, arm64]
+        default: x64
+      signed:
+        description: "签名安装包（需先在仓库配置签名 secrets，默认关闭）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-desktop-win-${{ inputs.arch }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows ${{ inputs.arch }} NSIS
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # setup-vp 自带 package.json engines 里钉死的 Node（26.13.1），并暴露 vp。
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          # setup-vp 的缓存会把 Linux 形状的 store 还原到 Windows，比不缓存更慢（上游 #7975）。
+          cache: false
+          run-install: false
+
+      - name: Resolve pnpm store path
+        id: pnpm_store
+        shell: pwsh
+        run: '"path=$(vp pm cache dir)" >> $env:GITHUB_OUTPUT'
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm_store.outputs.path }}
+          key: win-desktop-pnpm-v1-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install workspace
+        run: vp install
+
+      - name: Ensure Electron runtime
+        run: vp run --filter "@t3tools/desktop" ensure:electron
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+
+      # preflightWindowsDesktopBuild 会校验 VC\Tools\MSVC\<ver>\lib\spectre\<arch>，
+      # 缺了直接 WindowsDesktopBuildPrerequisitesMissingError。GitHub 托管镜像默认
+      # 不带 Spectre 缓解库，必须补装该 VS 组件（托管 runner 本身有管理员权限）。
+      - name: Add Spectre-mitigated MSVC libraries
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$install) { throw 'vswhere 找不到带 VC++ 工具集的 VS 安装' }
+
+          $component = '${{ inputs.arch == 'arm64' && 'Microsoft.VisualStudio.Component.VC.Runtimes.ARM64.Spectre' || 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre' }}'
+          $installer = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vs_installer.exe'
+          $p = Start-Process -FilePath $installer -Wait -PassThru -NoNewWindow -ArgumentList @(
+            'modify', '--installPath', "`"$install`"", '--add', $component,
+            '--quiet', '--norestart', '--wait'
+          )
+          if ($p.ExitCode -notin @(0, 3010)) { throw "vs_installer 退出码 $($p.ExitCode)" }
+
+          $spectreArch = if ('${{ inputs.arch }}' -eq 'arm64') { 'arm64' } else { 'x64' }
+          $toolset = Get-ChildItem (Join-Path $install 'VC\Tools\MSVC') -Directory |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          $spectre = Join-Path $toolset.FullName "lib\spectre\$spectreArch"
+          if (!(Test-Path $spectre)) { throw "Spectre 库仍缺失: $spectre" }
+
+      # .env.example 里是官方发布同样烧进产品的公开标识，不是密钥。
+      - name: Write build config
+        shell: pwsh
+        run: Copy-Item .env.example .env -Force
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          $args = @('scripts/build-desktop-artifact.ts', '--platform', 'win', '--target', 'nsis', '--arch', '${{ inputs.arch }}')
+          if ('${{ inputs.signed }}' -eq 'true') { $args += '--signed' }
+          node @args
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem release -File |
+            ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+            Tee-Object -FilePath release/SHA256SUMS.txt | Out-Host
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3code-desktop-win-${{ inputs.arch }}
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/*.yml
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
