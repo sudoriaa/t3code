@@ -100,31 +100,38 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64
+        run: node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64 --keep-stage
 
-      # 即使 payload 校验失败，也要拿到 electron-builder 已经产出的安装包和文件清单。
-      - name: Inspect payload
+      # 脚本在 payload 校验失败时会先退出，来不及把 stage 产物拷到 release/，临时 stage
+      # 目录也随作用域被删。--keep-stage 把它留住，这里把已生成的安装包和清单捞出来。
+      - name: Collect artifact from kept stage
         if: always()
         shell: pwsh
         run: |
-          if (!(Test-Path release)) { Write-Output 'release/ 不存在'; exit 0 }
-          $root = (Resolve-Path release).Path
-          $files = Get-ChildItem release -Recurse -File
-          Write-Output "release/ 文件总数: $($files.Count)"
-          $unpackedRoot = Join-Path $root 'win-unpacked'
-          $unpacked = $files | Where-Object { $_.FullName.StartsWith($unpackedRoot) }
-          Write-Output "win-unpacked 文件数: $($unpacked.Count)  (脚本上限 80)"
-          if ($unpacked) {
-            $unpacked | ForEach-Object { $_.FullName.Substring($root.Length + 1) } |
-              Sort-Object | Set-Content (Join-Path $root 'win-unpacked-files.txt')
-            Write-Output '--- win-unpacked 第一层分组 ---'
-            $unpacked |
-              ForEach-Object { $_.FullName.Substring($unpackedRoot.Length + 1).Split('\')[0] } |
-              Group-Object | Sort-Object Count -Descending |
-              ForEach-Object { '{0,4}  {1}' -f $_.Count, $_.Name }
+          $stage = Get-ChildItem $env:TEMP -Directory -Filter 't3code-desktop-win-stage-*' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (!$stage) { Write-Output '没有 kept stage 目录'; exit 0 }
+          Write-Output "stage: $($stage.FullName)"
+          $dist = Join-Path $stage.FullName 'app\dist'
+          if (!(Test-Path $dist)) { Write-Output "dist 不存在: $dist"; exit 0 }
+
+          New-Item -ItemType Directory -Force release | Out-Null
+          Get-ChildItem $dist -File | Where-Object { $_.Extension -in '.exe', '.blockmap', '.yml' } |
+            Copy-Item -Destination release -Force
+
+          $unpackedRoot = Join-Path $dist 'win-unpacked'
+          if (Test-Path $unpackedRoot) {
+            $files = Get-ChildItem $unpackedRoot -Recurse -File
+            Write-Output "win-unpacked 文件数: $($files.Count) (脚本上限 80)"
+            $files | ForEach-Object { $_.FullName.Substring($unpackedRoot.Length + 1) } |
+              Sort-Object | Set-Content release\win-unpacked-files.txt
+            Write-Output '--- 第一层分组 ---'
+            $files | ForEach-Object { $_.FullName.Substring($unpackedRoot.Length + 1).Split('\')[0] } |
+              Group-Object | Sort-Object Count -Descending | ForEach-Object { '{0,4}  {1}' -f $_.Count, $_.Name }
           }
+
           Write-Output '--- release/ 顶层 ---'
-          Get-ChildItem release | Select-Object Mode, @{n='MB';e={[math]::Round($_.Length/1MB,1)}}, Name |
+          Get-ChildItem release | Select-Object @{n='MB';e={[math]::Round($_.Length/1MB,1)}}, Name |
             Format-Table -AutoSize | Out-String | Write-Output
 
       - name: Checksums
