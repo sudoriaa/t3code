@@ -32,6 +32,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as AcpRegistryRuntimeCoordinator from "./AcpRegistryRuntimeCoordinator.ts";
+import { mergeBuiltInAcpRegistryAgents } from "./builtinAcpAgents.ts";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -928,7 +929,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     if (discarded > 0) {
       yield* Effect.logWarning("ignored invalid ACP Registry entries", { discarded });
     }
-    return { version: envelope.version, agents } satisfies AcpRegistryIndex;
+    return { version: envelope.version, agents: mergeBuiltInAcpRegistryAgents(agents) } satisfies AcpRegistryIndex;
   });
 
   const readCachedRegistry = fileSystem

@@ -6,8 +6,8 @@ T3 Code negotiates ACP v2 preview when supported and falls back to ACP v1 automa
 
 ## Add an agent
 
-- **From the ACP Registry**: Open **Settings → Providers → Add provider → Show more**, search for an agent compatible with your server, click **Add**, and complete sign-in. Registry agents are third-party code—review an agent's source and license before adding it.
-- **Local ACP command**: Under **Show more → Local ACP command**, enter the executable path/name, literal arguments (one per row—no shell expansion; e.g., `dsh` with `--profile` and `acp`), and a display name.
+- **From the ACP Registry**: Open **Settings → Providers → Add provider → Show more**, search for an agent compatible with your server, click **Add**, and complete sign-in. Registry agents are third-party code—review an agent's source and license before adding it. DeepSeek Harness ships in that list even when the Registry has not published it yet.
+- **Local ACP command**: Under **Show more → Local ACP command**, enter the executable path/name, literal arguments (one per row—no shell expansion; e.g., `dsh acp` for a DeepSeek Harness install you manage yourself), and a display name.
 
 ## Installation and updates
 

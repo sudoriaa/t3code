@@ -2379,6 +2379,101 @@ describe("AcpRegistrySupport", () => {
       ),
     );
   });
+  it.effect("offers a bundled agent that the registry does not list", () => {
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-bundled-",
+      });
+      const npmBin = `${cacheDir}/fake-node/bin`;
+      yield* fileSystem.makeDirectory(npmBin, { recursive: true });
+      yield* fileSystem.writeFileString(`${npmBin}/npm`, "#!/bin/sh\nexit 0\n");
+      yield* fileSystem.chmod(`${npmBin}/npm`, 0o755);
+      const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+        cacheDir,
+        toolsDir: `${cacheDir}/tools`,
+        registryUrl,
+      }).pipe(
+        Effect.provide(
+          layerResolver(
+            (request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  new Response(makeRegistry(makeAgent({ npx: { package: "@example/acp@1.2.3" } }))),
+                ),
+              ),
+            { PATH: npmBin },
+          ),
+        ),
+      );
+
+      const result = yield* resolver.search({ query: "deepseek" });
+
+      expect(result.agents).toMatchObject([
+        {
+          id: "dsh",
+          name: "DeepSeek Harness",
+          version: "0.2.2-rc.5",
+          distribution: "npx",
+        },
+      ]);
+    }).pipe(Effect.scoped);
+  });
+
+  it.effect("keeps a listed registry entry over the bundled copy of it", () => {
+    const listed = {
+      ...makeAgent({ npx: { package: "@deepseek-ai/dsh@9.9.9", args: ["acp"] } }),
+      id: "dsh",
+      name: "DeepSeek Harness",
+      version: "9.9.9",
+    } satisfies AcpRegistrySupport.AcpRegistryAgent;
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-acp-registry-bundled-override-",
+      });
+      const npmBin = `${cacheDir}/fake-node/bin`;
+      yield* fileSystem.makeDirectory(npmBin, { recursive: true });
+      yield* fileSystem.writeFileString(`${npmBin}/npm`, "#!/bin/sh\nexit 0\n");
+      yield* fileSystem.chmod(`${npmBin}/npm`, 0o755);
+      const resolver = yield* AcpRegistrySupport.makeAcpRegistryCatalog({
+        cacheDir,
+        toolsDir: `${cacheDir}/tools`,
+        registryUrl,
+      }).pipe(
+        Effect.provide(
+          layerResolver(
+            (request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(request, new Response(makeRegistry(listed))),
+              ),
+            { PATH: npmBin },
+          ),
+        ),
+      );
+
+      const result = yield* resolver.search({ query: "" });
+
+      expect(result.agents.map((agent) => `${agent.id}@${agent.version}`)).toEqual(["dsh@9.9.9"]);
+    }).pipe(Effect.scoped);
+  });
+
+  it("merges bundled agents without reordering or duplicating the listed ones", () => {
+    const listedExample = makeAgent({ npx: { package: "@example/acp@1.2.3" } });
+    const listedDsh = {
+      ...makeAgent({ npx: { package: "@deepseek-ai/dsh@9.9.9", args: ["acp"] } }),
+      id: "dsh",
+      version: "9.9.9",
+    } satisfies AcpRegistrySupport.AcpRegistryAgent;
+
+    expect(mergeBuiltInAcpRegistryAgents([]).map((agent) => agent.id)).toEqual(["dsh"]);
+    expect(mergeBuiltInAcpRegistryAgents([listedExample]).map((agent) => agent.id)).toEqual([
+      "example-agent",
+      "dsh",
+    ]);
+    expect(mergeBuiltInAcpRegistryAgents([listedDsh]).map((agent) => agent.id)).toEqual(["dsh"]);
+  });
 });
 
 describe("acpRegistryManagedBinaryDirectories", () => {
