@@ -1545,7 +1545,7 @@ describe("AcpRegistrySupport", () => {
       });
       const result = yield* resolver.search({ query: "" });
 
-      expect(result.agents.map((agent) => agent.id)).toEqual([valid.id]);
+      expect(result.agents.map((agent) => agent.id)).toEqual(["dsh", valid.id]);
     }).pipe(
       Effect.scoped,
       Effect.provide(
@@ -1580,7 +1580,7 @@ describe("AcpRegistrySupport", () => {
       });
       const result = yield* resolver.search({ query: "" });
 
-      expect(result.agents).toEqual([]);
+      expect(result.agents.map((agent) => agent.id)).toEqual(["dsh"]);
     }).pipe(
       Effect.scoped,
       Effect.provide(
